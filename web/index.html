@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PQ Provenance</title>
+<meta name="description" content="Check post-quantum (SLH-DSA) attestations of files and contracts on Arc mainnet, straight from the chain.">
+<style>
+  :root { --bg: #fbfaf7; --fg: #1d1d1b; --muted: #66645e; --line: #dedad2; --card: #ffffff; --ok: #1e7b46; --bad: #a3312b; --accent: #2f5bd3; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --fg: #ecebe6; --muted: #a09d95; --line: #34332f; --card: #1d1d1b; --ok: #5ccf8b; --bad: #f07b72; --accent: #8ba8ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  p.lead { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin: 0 0 16px; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text] { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  input[type=file] { font-size: .9rem; color: var(--fg); }
+  button { margin-top: 12px; padding: 8px 14px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  .out { margin-top: 12px; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ok { color: var(--ok); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; }
+  footer, .note { color: var(--muted); font-size: .85rem; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PQ Provenance</h1>
+  <p class="lead">Post-quantum signatures for releases and contracts on Arc. A publisher is an SLH-DSA-SHA2-128s key; every attestation is verified on-chain by Arc's native precompile. This page only reads the chain: nothing to connect, nothing to sign.</p>
+
+  <section>
+    <h2>Registry and publisher</h2>
+    <label for="registry">Registry contract on Arc mainnet (chain 5042)</label>
+    <input id="registry" type="text" spellcheck="false" placeholder="0x…">
+    <label for="vk">Publisher key (32-byte SLH-DSA public key)</label>
+    <input id="vk" type="text" spellcheck="false" placeholder="0x…">
+    <button id="key-btn">Check key</button>
+    <div id="key-out" class="out" aria-live="polite"></div>
+  </section>
+
+  <section>
+    <h2>Check a file</h2>
+    <p class="note">The file is hashed in your browser (SHA-256) and never uploaded.</p>
+    <input id="file" type="file">
+    <label for="subject">or a subject hash</label>
+    <input id="subject" type="text" spellcheck="false" placeholder="0x…">
+    <button id="file-btn">Check file</button>
+    <div id="file-out" class="out" aria-live="polite"></div>
+  </section>
+
+  <section>
+    <h2>Check a contract</h2>
+    <p class="note">True only if the bytecode now at the address was attested by this key. Attest implementations, not proxies.</p>
+    <label for="target">Contract address</label>
+    <input id="target" type="text" spellcheck="false" placeholder="0x…">
+    <button id="code-btn">Check contract</button>
+    <div id="code-out" class="out" aria-live="polite"></div>
+  </section>
+
+  <footer>Reads from <code>https://rpc.mainnet.arc.io</code>. Pin the publisher key you trust: a key's label is free text anyone can claim. Prefill fields with <code>?registry=…&amp;vk=…</code>.</footer>
+</main>
+<script type="module">
+  import { codeInfo, fileSubject, keyInfo, labelText, rpcCaller, subjectInfo } from "./view.js";
+
+  // Arc mainnet deployment of 2026-10-04; ?registry= overrides it.
+  const DEFAULT_REGISTRY = "0xA0E319147b11Fc133Bf725Cb547D994eA0AD15dc";
+  const params = new URLSearchParams(location.search);
+  const $ = (id) => document.getElementById(id);
+  $("registry").value = params.get("registry") ?? DEFAULT_REGISTRY;
+  $("vk").value = params.get("vk") ?? "";
+
+  const when = (t) => (t ? new Date(t * 1000).toISOString().replace(".000", "") : "never");
+  const verdict = (ok, yes, no) => `<span class="${ok ? "ok" : "bad"}">${ok ? yes : no}</span>`;
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const inputs = () => ({ call: rpcCaller($("registry").value.trim()), vk: $("vk").value.trim() });
+
+  async function run(out, task) {
+    $(out).textContent = "Reading Arc…";
+    try { $(out).innerHTML = await task(); } catch (e) { $(out).innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
+  }
+
+  $("key-btn").onclick = () => run("key-out", async () => {
+    const { call, vk } = inputs();
+    const k = await keyInfo(call, vk);
+    if (k.status === "unknown") return verdict(false, "", "Key not registered");
+    return [
+      `status        ${verdict(k.status === "active", k.status, k.status)}`,
+      `label         ${esc(labelText(k.label))} (self-declared)`,
+      `registered    ${when(k.registeredAt)}`,
+      k.closedAt ? `closed        ${when(k.closedAt)}` : null,
+      k.status === "rotated" ? `current key   ${k.currentKey ?? "chain longer than 64 hops"}` : null,
+      `attestations  ${k.attestationCount}`,
+    ].filter(Boolean).join("\n");
+  });
+
+  $("file-btn").onclick = () => run("file-out", async () => {
+    const { call, vk } = inputs();
+    const f = $("file").files[0];
+    const subject = f ? await fileSubject(await f.arrayBuffer()) : $("subject").value.trim();
+    const s = await subjectInfo(call, vk, subject);
+    return [
+      `subject   ${subject}`,
+      `verdict   ${verdict(s.valid, "attested by this key", "not attested by this key")}`,
+      s.attestedAt ? `attested  ${when(s.attestedAt)}` : null,
+      s.retractedAt ? `retracted ${when(s.retractedAt)}` : null,
+      !s.valid && s.attestedAt && !s.retractedAt ? "the key has been revoked" : null,
+    ].filter(Boolean).join("\n");
+  });
+
+  $("code-btn").onclick = () => run("code-out", async () => {
+    const { call, vk } = inputs();
+    const { valid } = await codeInfo(call, vk, $("target").value.trim());
+    return verdict(valid, "code attested by this key", "code not attested by this key (or no code at the address)");
+  });
+</script>
+</body>
+</html>
